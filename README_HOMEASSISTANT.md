@@ -16,7 +16,7 @@ This Home Assistant custom component provides local control of Petkit W5 series 
 ### Controls
 - **Power Switch**: Turn fountain on/off
 - **Smart Mode**: Enable/disable smart mode operation
-- **Filter Reset**: Reset filter life indicator (via service call)
+- **Filter Reset**: Reset each fountain's filter life from its device button
 
 ### Status Indicators
 - **Filter Problem**: Alert for filter issues
@@ -57,6 +57,7 @@ config/
 │   └── petkit_ble/
 │       ├── __init__.py
 │       ├── binary_sensor.py
+│       ├── button.py
 │       ├── config_flow.py
 │       ├── const.py
 │       ├── coordinator.py
@@ -106,6 +107,7 @@ Petkit devices are automatically discovered through Home Assistant's built-in Bl
 ### Basic Operations
 - Use the **Power** switch to turn your fountain on/off
 - Toggle **Smart Mode** to enable/disable intelligent operation scheduling
+- Press **Reset filter** on the fountain's device page after replacing its filter
 - Monitor filter status and replace when the **Filter** sensor shows low percentage
 
 ### Automation Examples

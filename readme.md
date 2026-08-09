@@ -91,12 +91,12 @@ The integration will create entities for:
 - Smart mode toggle
 - LED control
 
-## Services
+## Controls and actions
 
-The integration provides Home Assistant services for advanced control:
+The integration provides device controls and Home Assistant actions:
 
-### `petkit_ble.reset_filter`
-Reset the water filter counter.
+### Filter reset button
+Open the fountain's device page and press **Reset filter** after replacing the filter. Each configured fountain has its own button.
 
 ### `petkit_ble.set_device_config`
 Configure device settings including:
@@ -112,6 +112,8 @@ data:
   smart_time_off: 90
   led_brightness: 50
 ```
+
+When multiple fountains are configured, select one or more target devices in the action editor.
 
 ## Automation Examples
 

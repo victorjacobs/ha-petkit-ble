@@ -362,7 +362,18 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         
     async def async_reset_filter(self) -> None:
         """Reset the device filter."""
+        if not self._initialized:
+            raise UpdateFailed("Device is not initialized")
+
+        if not self.ble_manager.connected_devices.get(self.address):
+            raise UpdateFailed("Device is not connected")
+
         await self.commands.set_reset_filter()
+
+        try:
+            await asyncio.wait_for(self.ble_manager.queue.join(), timeout=10)
+        except TimeoutError as err:
+            raise UpdateFailed("Timed out while resetting the filter") from err
         
     async def async_set_device_config(self, config_data: list) -> None:
         """Set device configuration."""

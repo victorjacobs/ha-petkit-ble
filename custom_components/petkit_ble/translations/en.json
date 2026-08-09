@@ -1,0 +1,9 @@
+{
+  "entity": {
+    "button": {
+      "reset_filter": {
+        "name": "Reset filter"
+      }
+    }
+  }
+}
