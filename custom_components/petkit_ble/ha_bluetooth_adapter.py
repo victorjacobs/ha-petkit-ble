@@ -63,10 +63,18 @@ class HABluetoothAdapter:
             # Filter for Petkit devices
             petkit_devices = {}
             for service_info in discovered_devices:
-                if service_info.name and any(
+                is_configured_device = (
+                    service_info.address.upper() == self.address.upper()
+                )
+                has_petkit_name = service_info.name and any(
                     device_type in service_info.name 
                     for device_type in ["W4", "W5", "CTW2"]
-                ):
+                )
+
+                if is_configured_device or has_petkit_name:
+                    device_address = (
+                        self.address if is_configured_device else service_info.address
+                    )
                     # Create a mock device object compatible with existing library
                     # Convert service_data to the format expected by the library
                     # The combine_byte_arrays function expects a dict with .values()
@@ -78,8 +86,8 @@ class HABluetoothAdapter:
                         service_data_dict = {"default": [0, 0, 0, 0, 0, 206]}  # 206 = W5 device type
                     
                     mock_device = type('MockDevice', (), {
-                        'name': service_info.name,
-                        'address': service_info.address,
+                        'name': service_info.name or "Petkit Water Fountain",
+                        'address': device_address,
                         'rssi': service_info.rssi,
                         'details': {
                             'props': {
@@ -89,8 +97,8 @@ class HABluetoothAdapter:
                         }
                     })()
                     
-                    petkit_devices[service_info.address] = mock_device
-                    self.connectiondata[service_info.address] = mock_device
+                    petkit_devices[device_address] = mock_device
+                    self.connectiondata[device_address] = mock_device
                     
             self.available_devices = petkit_devices
             

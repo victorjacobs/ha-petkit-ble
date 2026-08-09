@@ -140,9 +140,12 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         self._initialized = False
         self._listeners: set = set()
         self._initialization_task = None
+        self._initialization_lock = asyncio.Lock()
         
         # Listen for options updates
-        self.entry.add_update_listener(self.async_options_updated)
+        self.entry.async_on_unload(
+            self.entry.add_update_listener(self.async_options_updated)
+        )
 
     async def async_start(self) -> None:
         """Start the coordinator and immediately initialize connection."""
@@ -161,7 +164,9 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         while not self._initialized:
             try:
                 _LOGGER.info(f"Initialization attempt {retry_count + 1}")
-                await self._initialize_device()
+                async with self._initialization_lock:
+                    if not self._initialized:
+                        await self._initialize_device()
                 if self._initialized:
                     _LOGGER.info("Device initialization successful")
                     break
@@ -185,7 +190,9 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
 
     async def _async_setup(self) -> None:
         """Set up the coordinator during first refresh."""
-        await self._initialize_device()
+        async with self._initialization_lock:
+            if not self._initialized:
+                await self._initialize_device()
 
     async def _initialize_device(self) -> None:
         """Initialize the BLE connection and device."""
@@ -307,7 +314,7 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
             
         except Exception as err:
             import traceback
-            _LOGGER.error("Device initialization failed: %s", err)
+            _LOGGER.debug("Device initialization attempt failed: %s", err)
             _LOGGER.debug("Full traceback:\n%s", traceback.format_exc())
             await self._cleanup()
             # Don't raise here - let the system retry later
@@ -315,6 +322,18 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator and cleanup resources."""
+        if (
+            self._initialization_task
+            and self._initialization_task is not asyncio.current_task()
+            and not self._initialization_task.done()
+        ):
+            self._initialization_task.cancel()
+
+            try:
+                await self._initialization_task
+            except asyncio.CancelledError:
+                pass
+
         await self._cleanup()
 
     async def async_options_updated(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -329,12 +348,6 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
     async def _cleanup(self) -> None:
         """Cleanup resources."""
         self._initialized = False
-
-        # Remove options update listener
-        try:
-            self.entry.async_remove_update_listener(self.async_options_updated)
-        except (ValueError, KeyError):
-            pass  # Listener may not be registered or already removed
         
         if self._consumer_task:
             self._consumer_task.cancel()
@@ -353,15 +366,6 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
 
         await self.ble_manager.stop_reconnection()
         
-        if self._initialization_task and not self._initialization_task.done():
-            self._initialization_task.cancel()
-            # Don't await cancelled task, just let it clean up
-            try:
-                # Give it a brief moment to process the cancellation
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                _LOGGER.debug(f"Error during initialization task cancellation: {e}")
-                
         # Stop notifications and disconnect
         if self.address in self.ble_manager.connected_devices:
             await self.ble_manager.stop_notifications(self.address, Constants.READ_UUID)
