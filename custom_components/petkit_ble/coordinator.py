@@ -379,10 +379,8 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         if not self.ble_manager.connected_devices.get(self.address):
             raise UpdateFailed("Device is not connected")
 
-        await self.commands.set_reset_filter()
-
         try:
-            await asyncio.wait_for(self.ble_manager.queue.join(), timeout=10)
+            await asyncio.wait_for(self.commands.set_reset_filter(), timeout=10)
         except TimeoutError as err:
             raise UpdateFailed("Timed out while resetting the filter") from err
         

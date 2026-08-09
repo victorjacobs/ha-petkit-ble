@@ -269,16 +269,21 @@ class Commands:
         return
 
     async def set_reset_filter(self):
-        cmd = 222                           # Command for getting device details
+        cmd = 222                           # Command for resetting filter life
         type = 1                            # Type is 1 for sending - 2 for receiving
         seq = self.sequence                 # Example sequence number
-        data = [0]                          # 0 resets it
-        
+        data = []
+
         bytes = Utils.build_command(seq, cmd, type, data)
-        await self.ble_manager.message_producer(bytes)
-        
+        write_succeeded = await self.ble_manager.message_producer(
+            bytes, wait_for_write=True
+        )
+
+        if not write_succeeded:
+            raise ConnectionError("Failed to send the filter reset command")
+
         self.increment_sequence()
-        
+
         self.logger.info(f"Queued command: {cmd}")
         return
 

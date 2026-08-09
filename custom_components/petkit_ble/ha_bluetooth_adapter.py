@@ -347,11 +347,19 @@ class HABluetoothAdapter:
                     await asyncio.sleep(0.1)  # Very short sleep between checks
                     continue
                     
-                message = await self.queue.get()
-                success = await self.write_characteristic(address, characteristic_uuid, message)
-                if success:
-                    self._update_last_seen()
-                self.queue.task_done()
+                message, write_result = await self.queue.get()
+
+                try:
+                    success = await self.write_characteristic(
+                        address, characteristic_uuid, message
+                    )
+                    if success:
+                        self._update_last_seen()
+
+                    if write_result is not None and not write_result.done():
+                        write_result.set_result(success)
+                finally:
+                    self.queue.task_done()
                 
             except asyncio.CancelledError:
                 break
@@ -383,9 +391,19 @@ class HABluetoothAdapter:
             # Will be called again by the consumer loop
             pass
 
-    async def message_producer(self, message: bytes) -> None:
+    async def message_producer(
+        self, message: bytes, *, wait_for_write: bool = False
+    ) -> bool:
         """Add message to queue for processing."""
-        await self.queue.put(message)
+        write_result = (
+            asyncio.get_running_loop().create_future() if wait_for_write else None
+        )
+        await self.queue.put((message, write_result))
+
+        if write_result is None:
+            return True
+
+        return await write_result
     
     @property
     def connection_status(self):
