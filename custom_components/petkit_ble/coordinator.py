@@ -9,9 +9,11 @@ from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth.active_update_processor import ActiveBluetoothProcessorCoordinator
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import CONF_ADDRESS, CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+from .const import CONF_ADDRESS, CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .ha_bluetooth_adapter import HABluetoothAdapter
 
 # Import the Petkit library modules (included in the integration)
@@ -46,6 +48,7 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the coordinator."""
+        self.hass = hass
         self.entry = entry
         self.address = entry.data[CONF_ADDRESS]
         self.update_interval = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
@@ -56,7 +59,8 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         self.event_handlers = EventHandlers(
             device=self.device, 
             commands=self.commands, 
-            logger=_LOGGER
+            logger=_LOGGER,
+            info_updated_callback=self._update_device_registry,
         )
         
         # Use HA Bluetooth adapter instead of direct BLE manager
@@ -254,6 +258,8 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
                 self.device.product_name = "Petkit BLE Water Fountain"
                 self.device.device_type = 14  # Default device type for W5
                 self.device.type_code = 14
+
+            self._update_device_registry()
             
             _LOGGER.info("Performing minimal device initialization...")
             
@@ -282,9 +288,6 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
                 # Continue anyway - we'll try to get data without full initialization
             
             # Set basic device information directly since communication is working
-            if self.device.serial == "Uninitialized":
-                self.device.serial = f"PETKIT_{self.address.replace(':', '')[-6:]}"
-                
             if not hasattr(self.device, 'name') or not self.device.name or self.device.name == "Uninitialized":
                 self.device.name = "Water Fountain"
                 self.device.name_readable = "Water Fountain"
@@ -292,10 +295,8 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
             # Always ensure we have a proper product name for the device model
             if not hasattr(self.device, 'product_name') or not self.device.product_name or self.device.product_name == "Uninitialized":
                 self.device.product_name = "Petkit BLE Water Fountain"
-                
-            # Set a default firmware version if none received yet
-            if not hasattr(self.device, 'firmware') or self.device.firmware == 0:
-                self.device.firmware = 1.0  # Default firmware version
+
+            self._update_device_registry()
             
             _LOGGER.info(f"Set device info: serial='{self.device.serial}', name='{self.device.name_readable}', firmware='{self.device.firmware}'")
             
@@ -344,6 +345,56 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         if old_interval != self.update_interval:
             _LOGGER.info(f"Update interval changed from {old_interval} to {self.update_interval} seconds")
             # No need to restart the polling task, the change will take effect on the next iteration
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return stable Home Assistant device metadata."""
+        device_name = self.device.name_readable
+        if not device_name or device_name == "Uninitialized":
+            device_name = "Petkit Water Fountain"
+
+        model = self.device.product_name
+        if not model or model == "Uninitialized":
+            model = "Petkit BLE Water Fountain"
+
+        info = DeviceInfo(
+            identifiers={(DOMAIN, self.address)},
+            name=device_name,
+            manufacturer="Petkit",
+            model=model,
+        )
+
+        if self.device.firmware:
+            info["sw_version"] = str(self.device.firmware)
+
+        if self.device.serial and self.device.serial != "Uninitialized":
+            info["serial_number"] = str(self.device.serial)
+
+        return info
+
+    def _update_device_registry(self) -> None:
+        """Update registry metadata after BLE device information changes."""
+        registry = dr.async_get(self.hass)
+        device_entry = registry.async_get_device_by_identifier(
+            (DOMAIN, self.address), self.entry.entry_id
+        )
+
+        if device_entry is None:
+            entries = dr.async_entries_for_config_entry(registry, self.entry.entry_id)
+            if len(entries) != 1:
+                return
+            device_entry = entries[0]
+
+        info = self.device_info
+        registry.async_update_device(
+            device_entry.id,
+            manufacturer=info["manufacturer"],
+            model=info["model"],
+            name=info["name"],
+            new_identifiers=info["identifiers"],
+            serial_number=info.get("serial_number"),
+            sw_version=info.get("sw_version"),
+        )
 
     async def _cleanup(self) -> None:
         """Cleanup resources."""

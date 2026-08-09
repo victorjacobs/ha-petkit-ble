@@ -54,16 +54,7 @@ class PetkitSensorBase(CoordinatorEntity[PetkitBLECoordinator], SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info dynamically."""
-        # Use address as identifier if serial is not initialized yet
-        device_id = self.coordinator.device.serial if self.coordinator.device.serial != "Uninitialized" else self.coordinator.address
-        device_name = self.coordinator.device.name_readable if self.coordinator.device.name_readable != "Uninitialized" else "Water Fountain"
-        return {
-            "identifiers": {(DOMAIN, device_id)},
-            "name": device_name,
-            "manufacturer": "Petkit",
-            "model": self.coordinator.device.product_name or "Water Fountain",
-            "sw_version": str(self.coordinator.device.firmware) if self.coordinator.device.firmware else "Unknown",
-        }
+        return self.coordinator.device_info
     
     @property
     def name(self) -> str:
@@ -73,8 +64,6 @@ class PetkitSensorBase(CoordinatorEntity[PetkitBLECoordinator], SensorEntity):
     
     def _get_device_id(self) -> str:
         """Get device ID for unique_id generation."""
-        if self.coordinator.device.serial != "Uninitialized":
-            return self.coordinator.device.serial
         return self.coordinator.address.replace(":", "")
 
 class PetkitBatteryLevelSensor(PetkitSensorBase):

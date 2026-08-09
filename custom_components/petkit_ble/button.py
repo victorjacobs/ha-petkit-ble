@@ -38,25 +38,7 @@ class PetkitResetFilterButton(CoordinatorEntity[PetkitBLECoordinator], ButtonEnt
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
-        device = self.coordinator.device
-        device_id = (
-            device.serial
-            if device.serial != "Uninitialized"
-            else self.coordinator.address
-        )
-        device_name = (
-            device.name_readable
-            if device.name_readable != "Uninitialized"
-            else "Water Fountain"
-        )
-
-        return DeviceInfo(
-            identifiers={(DOMAIN, device_id)},
-            name=device_name,
-            manufacturer="Petkit",
-            model=device.product_name or "Water Fountain",
-            sw_version=str(device.firmware) if device.firmware else "Unknown",
-        )
+        return self.coordinator.device_info
 
     async def async_press(self) -> None:
         """Reset the filter life."""

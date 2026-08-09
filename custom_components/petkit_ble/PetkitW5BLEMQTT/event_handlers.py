@@ -3,9 +3,12 @@ from .utils import Utils
 from .parsers import Parsers
 
 class EventHandlers:
-    def __init__(self, device, commands, logger):
+    def __init__(
+        self, device, commands, logger, info_updated_callback=None
+    ):
         self.logger = logger
-        self.device = device        
+        self.device = device
+        self.info_updated_callback = info_updated_callback
         
         # Registry of command values to handler methods
         self.handlers = {
@@ -40,6 +43,9 @@ class EventHandlers:
                 self.logger.info(f"Updating device info with command {cmd}: {data}")
                 self.device.info = data
                 self.logger.info(f"Device info after update: firmware={self.device.firmware}, serial={self.device.serial}")
+
+                if self.info_updated_callback:
+                    self.info_updated_callback()
 
             # Update status
             if cmd in [66, 210, 211, 230]:
