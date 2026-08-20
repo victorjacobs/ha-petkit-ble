@@ -53,6 +53,7 @@ class HABluetoothAdapter:
         self._reset_interval = 300.0  # Reset connection attempts every 5 minutes
         self._immediate_reconnect = True  # Flag for immediate reconnection
         self._reconnection_task = None  # Track reconnection task
+        self._connection_lock = asyncio.Lock()
 
     async def scan(self) -> dict[str, Any]:
         """Scan for Petkit BLE devices using HA's bluetooth integration."""
@@ -113,6 +114,26 @@ class HABluetoothAdapter:
 
     async def connect_device(self, address: str) -> bool:
         """Connect to device using HA's bluetooth integration."""
+        async with self._connection_lock:
+            current_client = self.connected_devices.get(address)
+            if current_client and getattr(current_client, "is_connected", False):
+                return True
+
+            if current_client:
+                self.connected_devices.pop(address, None)
+                self._fail_pending_writes()
+
+                try:
+                    await asyncio.wait_for(current_client.disconnect(), timeout=5.0)
+                except Exception as err:
+                    self.logger.debug(
+                        "Failed to retire stale client for %s: %s", address, err
+                    )
+
+            return await self._connect_device(address)
+
+    async def _connect_device(self, address: str) -> bool:
+        """Establish a connection while holding the connection lock."""
         try:
             # Update status based on whether this is initial connection or retry
             if self._connection_attempts == 0:
@@ -147,14 +168,19 @@ class HABluetoothAdapter:
             
             # Use bleak-retry-connector directly with the BLE device
             from bleak import BleakClient
-            self._client = await establish_connection(
+            client = await establish_connection(
                 BleakClient,
                 self._ble_device,
                 address,
-                timeout=10.0  # Reduced timeout for faster retries
+                disconnected_callback=self._handle_disconnected,
+                timeout=10.0,
             )
-            
-            self.connected_devices[address] = self._client
+
+            if not client.is_connected:
+                raise ConnectionError("Client disconnected during connection setup")
+
+            self._client = client
+            self.connected_devices[address] = client
             self._update_connection_status(ConnectionStatus.CONNECTED)
             self._update_last_seen()
             
@@ -198,11 +224,9 @@ class HABluetoothAdapter:
             trigger_reconnect: If True, immediately attempt reconnection
         """
         try:
-            if address in self.connected_devices:
-                client = self.connected_devices[address]
+            if client := self.connected_devices.pop(address, None):
                 if hasattr(client, 'disconnect'):
                     await client.disconnect()
-                del self.connected_devices[address]
                 self._update_connection_status(ConnectionStatus.DISCONNECTED)
                 
                 # Trigger immediate reconnection if requested and enabled
@@ -219,9 +243,8 @@ class HABluetoothAdapter:
                 del self.connected_devices[address]
             self._update_connection_status(ConnectionStatus.DISCONNECTED, error_msg)
             
-            # Trigger immediate reconnection on unexpected disconnect
-            if self._immediate_reconnect:
-                self.logger.info("Triggering immediate reconnection after unexpected disconnect")
+            if trigger_reconnect and self._immediate_reconnect:
+                self.logger.info("Triggering reconnection after failed disconnect")
                 self.start_reconnection(address)
             
             return False
@@ -243,17 +266,19 @@ class HABluetoothAdapter:
 
     async def write_characteristic(self, address: str, characteristic_uuid: str, data: bytes) -> bool:
         """Write characteristic using HA's bluetooth client."""
+        client = None
+
         try:
             if address in self.connected_devices:
                 client = self.connected_devices[address]
                 # Check if client is still connected before attempting write
                 if hasattr(client, 'is_connected') and not client.is_connected:
-                    self.logger.warning(f"Client for {address} reports not connected, triggering immediate reconnection...")
-                    del self.connected_devices[address]
-                    self._update_connection_status(ConnectionStatus.RECONNECTING, "Client disconnected during write")
-                    # Trigger immediate reconnection
-                    if self._immediate_reconnect:
-                        self.start_reconnection(address)
+                    self.logger.warning(
+                        "Client for %s reports not connected; reconnecting", address
+                    )
+                    await self._retire_client(
+                        address, client, "Client disconnected during write"
+                    )
                     return False
                     
                 await client.write_gatt_char(characteristic_uuid, data)
@@ -268,15 +293,63 @@ class HABluetoothAdapter:
                 return False
         except Exception as err:
             error_msg = f"Write failed: {err}"
-            self.logger.warning(f"Error writing to characteristic {characteristic_uuid}: {err}")
-            # Mark as disconnected so reconnection will be attempted
-            if address in self.connected_devices:
-                del self.connected_devices[address]
-            self._update_connection_status(ConnectionStatus.RECONNECTING, error_msg)
-            # Trigger immediate reconnection
-            if self._immediate_reconnect:
-                self.start_reconnection(address)
+            self.logger.warning(
+                "Error writing to characteristic %s: %s", characteristic_uuid, err
+            )
+            await self._retire_client(address, client, error_msg)
             return False
+
+    def _handle_disconnected(self, client) -> None:
+        """Schedule cleanup when Bleak reports a disconnected client."""
+        asyncio.create_task(self._async_handle_disconnected(client))
+
+    async def _async_handle_disconnected(self, client) -> None:
+        """Clean up an unexpected disconnect and reconnect."""
+        address = self.address
+        if self.connected_devices.get(address) is not client:
+            return
+
+        self.connected_devices.pop(address, None)
+        self._fail_pending_writes()
+        self._update_connection_status(
+            ConnectionStatus.RECONNECTING, "Peripheral disconnected"
+        )
+
+        if self._immediate_reconnect:
+            self.start_reconnection(address)
+
+    async def _retire_client(self, address: str, client, error: str) -> None:
+        """Retire a failed client before starting a replacement connection."""
+        if self.connected_devices.get(address) is client:
+            self.connected_devices.pop(address, None)
+
+        self._fail_pending_writes()
+        self._update_connection_status(ConnectionStatus.RECONNECTING, error)
+
+        if getattr(client, "is_connected", False):
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=5.0)
+            except TimeoutError:
+                self.logger.debug("Timed out disconnecting failed client for %s", address)
+            except Exception as err:
+                self.logger.debug(
+                    "Failed to disconnect stale client for %s: %s", address, err
+                )
+
+        if self._immediate_reconnect:
+            self.start_reconnection(address)
+
+    def _fail_pending_writes(self) -> None:
+        """Discard writes queued for a connection that has been lost."""
+        while True:
+            try:
+                _, write_result = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+            if write_result is not None and not write_result.done():
+                write_result.set_result(False)
+            self.queue.task_done()
 
     async def start_notifications(self, address: str, characteristic_uuid: str) -> bool:
         """Start notifications using HA's bluetooth client."""
@@ -403,6 +476,9 @@ class HABluetoothAdapter:
         self, message: bytes, *, wait_for_write: bool = False
     ) -> bool:
         """Add message to queue for processing."""
+        if not self.connected_devices.get(self.address):
+            return False
+
         write_result = (
             asyncio.get_running_loop().create_future() if wait_for_write else None
         )
@@ -467,16 +543,11 @@ class HABluetoothAdapter:
     def _calculate_retry_delay(self):
         """Calculate exponential backoff delay."""
         if self._immediate_reconnect:
-            # For immediate reconnection, use minimal delays
-            if self._connection_attempts < 5:
-                return 0.1  # 100ms for first 5 attempts
+            if self._connection_attempts < 3:
+                return 1.0
             elif self._connection_attempts < 10:
-                return 0.5  # 500ms for next 5 attempts
-            elif self._connection_attempts < 20:
-                return 1.0  # 1 second for next 10 attempts
-            else:
-                # Gradually increase but stay relatively low
-                return min(5.0, 1.0 + (self._connection_attempts - 20) * 0.5)
+                return 2.0
+            return 5.0
         else:
             # Original exponential backoff for non-immediate mode
             delay = min(self._retry_delay * (2 ** self._connection_attempts), self._max_retry_delay)
@@ -515,6 +586,7 @@ class HABluetoothAdapter:
                             self._connection_attempts + 1,
                         )
 
+                    await asyncio.sleep(self._calculate_retry_delay())
                     success = await self.connect_device(address)
 
                     if success:
@@ -537,14 +609,12 @@ class HABluetoothAdapter:
 
                         break
 
-                    delay = self._calculate_retry_delay()
                     if self._connection_attempts % 10 == 0:
                         self.logger.debug(
                             "Reconnection failed, retrying in %ss (attempt #%s)",
-                            delay,
+                            self._calculate_retry_delay(),
                             self._connection_attempts,
                         )
-                    await asyncio.sleep(delay)
 
                 except asyncio.CancelledError:
                     self.logger.info("Immediate reconnection loop cancelled")

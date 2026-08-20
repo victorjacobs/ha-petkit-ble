@@ -82,51 +82,9 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         # Initialize data processor
         self.data = PetkitBLEData(self.device)
         
-        # Define poll method for this instance
-        async def _async_poll(service_info: bluetooth.BluetoothServiceInfoBleak) -> PetkitBLEData:
-            """Poll the device for updated data."""
-            try:
-                # Only poll if device is already initialized (prevent duplicate initialization)
-                if not self._initialized:
-                    _LOGGER.debug("Device not yet initialized, skipping poll")
-                    return self.data
-                
-                # Check if device is still connected before polling
-                if not self.ble_manager.connected_devices.get(self.address):
-                    _LOGGER.debug("Device not connected during poll, skipping")
-                    return self.data
-                    
-                # Get fresh device data using existing commands with timing
-                _LOGGER.debug("Polling device for data updates")
-                
-                await self.commands.get_battery()
-                await asyncio.sleep(0.4)  # Allow time for response
-                
-                await self.commands.get_device_state()
-                await asyncio.sleep(0.4)
-                
-                await self.commands.get_device_update() 
-                await asyncio.sleep(0.6)  # Longer wait for final response
-                
-                # Update data object
-                self.data.update(service_info)
-                
-                # Notify listeners of the update
-                self.async_update_listeners()
-                
-                _LOGGER.debug("Device poll completed")
-                return self.data
-                
-            except Exception as err:
-                _LOGGER.debug(f"Error polling device: {err}")
-                # Don't raise UpdateFailed - just return existing data
-                # This prevents the coordinator from failing completely
-                return self.data
-
         def _needs_poll(service_info: bluetooth.BluetoothServiceInfoBleak, last_poll: float | None) -> bool:
-            """Check if we need to poll the device."""
-            # Always poll for active data updates
-            return True
+            """Disable advertisement-triggered polling."""
+            return False
         
         super().__init__(
             hass,
@@ -135,7 +93,6 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
             mode=bluetooth.BluetoothScanningMode.ACTIVE,
             update_method=self.data.update,
             needs_poll_method=_needs_poll,
-            poll_method=_async_poll,
             connectable=True,
         )
         
@@ -145,6 +102,7 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         self._listeners: set = set()
         self._initialization_task = None
         self._initialization_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
         
         # Listen for options updates
         self.entry.async_on_unload(
@@ -448,7 +406,16 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         if not self._initialized:
             _LOGGER.debug("Device not initialized, skipping refresh request")
             return
-            
+
+        if self._refresh_lock.locked():
+            _LOGGER.debug("Device refresh already in progress, skipping duplicate")
+            return
+
+        async with self._refresh_lock:
+            await self._async_request_refresh()
+
+    async def _async_request_refresh(self) -> None:
+        """Request device data while holding the refresh lock."""
         try:
             # Check if device is still connected before attempting commands
             if not self.ble_manager.connected_devices.get(self.address):
