@@ -281,7 +281,9 @@ class HABluetoothAdapter:
                     )
                     return False
                     
-                await client.write_gatt_char(characteristic_uuid, data)
+                await client.write_gatt_char(
+                    characteristic_uuid, data, response=False
+                )
                 self.logger.debug(f"Write complete to {characteristic_uuid}")
                 self._update_last_seen()
                 return True
