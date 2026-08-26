@@ -41,6 +41,7 @@ class HABluetoothAdapter:
         
         # Connection status tracking (same as BLEManager)
         self._connection_status = ConnectionStatus.DISCONNECTED
+        self._has_connected = False
         self._last_seen = None
         self._connection_attempts = 0
         self._last_connection_attempt = None
@@ -135,11 +136,11 @@ class HABluetoothAdapter:
     async def _connect_device(self, address: str) -> bool:
         """Establish a connection while holding the connection lock."""
         try:
-            # Update status based on whether this is initial connection or retry
-            if self._connection_attempts == 0:
+            # Keep successful transparent reconnects out of the entity history.
+            if not self._has_connected:
                 self._update_connection_status(ConnectionStatus.CONNECTING)
                 self.logger.info(f"🔄 Initial BLE connection attempt to {address}")
-            else:
+            elif self._connection_attempts:
                 self._update_connection_status(ConnectionStatus.RECONNECTING)
                 if self._connection_attempts % 10 == 0:  # Log every 10th attempt
                     self.logger.info(f"🔄 BLE reconnection attempt #{self._connection_attempts} to {address}")
@@ -181,6 +182,7 @@ class HABluetoothAdapter:
 
             self._client = client
             self.connected_devices[address] = client
+            self._has_connected = True
             self._update_connection_status(ConnectionStatus.CONNECTED)
             self._update_last_seen()
             
@@ -313,9 +315,7 @@ class HABluetoothAdapter:
 
         self.connected_devices.pop(address, None)
         self._fail_pending_writes()
-        self._update_connection_status(
-            ConnectionStatus.RECONNECTING, "Peripheral disconnected"
-        )
+        self._connection_error = "Peripheral disconnected"
 
         if self._immediate_reconnect:
             self.start_reconnection(address)
@@ -326,7 +326,7 @@ class HABluetoothAdapter:
             self.connected_devices.pop(address, None)
 
         self._fail_pending_writes()
-        self._update_connection_status(ConnectionStatus.RECONNECTING, error)
+        self._connection_error = error
 
         if getattr(client, "is_connected", False):
             try:
@@ -675,6 +675,7 @@ class HABluetoothAdapter:
     def reset_connection_state(self):
         """Reset connection tracking state for clean restart."""
         self._connection_status = ConnectionStatus.DISCONNECTED
+        self._has_connected = False
         self._connection_attempts = 0
         self._retry_delay = 1.0
         self._connection_error = None
