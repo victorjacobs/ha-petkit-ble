@@ -68,7 +68,8 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
             hass=hass,
             address=self.address,
             event_handler=self.event_handlers,
-            logger=_LOGGER
+            logger=_LOGGER,
+            commands=self.commands,
         )
         
         # Complete the circular references

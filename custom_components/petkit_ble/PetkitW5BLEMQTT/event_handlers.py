@@ -7,6 +7,7 @@ class EventHandlers:
         self, device, commands, logger, info_updated_callback=None
     ):
         self.logger = logger
+        self.commands = commands
         self.device = device
         self.info_updated_callback = info_updated_callback
         
@@ -27,6 +28,15 @@ class EventHandlers:
     async def handle_notification(self, sender, message):
         parsed_data = Utils.parse_bytearray(message)
         cmd = parsed_data['cmd']
+        if cmd == 73:
+            if (
+                message == Utils.build_command(parsed_data['seq'], 73, 2, [1])
+                and parsed_data['seq'] == self.commands.pending_registration_sequence
+            ):
+                self.commands.registration_confirmed = True
+                self.commands.pending_registration_sequence = None
+                self.device.device_initialized = 1
+            return parsed_data
         self.logger.info(f"Received command {cmd}")
         
         self.logger.debug(f"Parsed data:\n{parsed_data}")
