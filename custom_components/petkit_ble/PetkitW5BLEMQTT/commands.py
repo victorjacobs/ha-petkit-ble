@@ -8,6 +8,8 @@ class Commands:
         self.device = device
         self.logger = logger  # Use the centralized logger
         self.sequence = 0
+        self.registration_confirmed = False
+        self.pending_registration_sequence = None
         
     def increment_sequence(self):
         self.sequence += 1
@@ -105,12 +107,13 @@ class Commands:
         # Pad the device_id_bytes with zeroes
         device_id = Utils.pad_array(self.device.device_id_bytes, 8)
         
-        data = [0, 0] + device_id + self.secret    # Placeholders
+        data = device_id + self.secret
         self.logger.debug(f"Device ID: {device_id}")
         self.logger.debug(f"Secret: {self.secret}")
         self.logger.debug(f"Data: {data}")
         
         bytes = Utils.build_command(seq, cmd, type, data)
+        self.pending_registration_sequence = seq
         await self.ble_manager.message_producer(bytes)
         
         self.increment_sequence()
@@ -136,8 +139,7 @@ class Commands:
         cmd = 86                            # Command for getting device details
         type = 1                            # Type is 1 for sending - 2 for receiving
         seq = self.sequence                 # Example sequence number
-        #data = [0, 0, 253, 54, 124, 210, 241, 44]   # What's going on here?
-        data = [0, 0] + self.secret         # What's going on here?
+        data = self.secret
         
         bytes = Utils.build_command(seq, cmd, type, data)
         await self.ble_manager.message_producer(bytes)

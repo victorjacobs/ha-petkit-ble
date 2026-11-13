@@ -12,6 +12,9 @@ from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .PetkitW5BLEMQTT.constants import Constants
+from .PetkitW5BLEMQTT.utils import Utils
+
 _LOGGER = logging.getLogger(__name__)
 
 class ConnectionStatus(Enum):
@@ -24,11 +27,15 @@ class ConnectionStatus(Enum):
 class HABluetoothAdapter:
     """Adapter to bridge HA's bluetooth integration with existing Petkit BLE library."""
     
-    def __init__(self, hass: HomeAssistant, address: str, event_handler=None, logger=None):
+    def __init__(
+        self, hass: HomeAssistant, address: str, event_handler=None, logger=None,
+        commands=None,
+    ):
         """Initialize the HA Bluetooth adapter."""
         self.hass = hass
         self.address = address
         self.event_handler = event_handler
+        self.commands = commands
         self.logger = logger or _LOGGER
         self.connected_devices = {}
         self.available_devices = {}
@@ -55,6 +62,7 @@ class HABluetoothAdapter:
         self._immediate_reconnect = True  # Flag for immediate reconnection
         self._reconnection_task = None  # Track reconnection task
         self._connection_lock = asyncio.Lock()
+        self._authentication_response = None
 
     async def scan(self) -> dict[str, Any]:
         """Scan for Petkit BLE devices using HA's bluetooth integration."""
@@ -180,6 +188,21 @@ class HABluetoothAdapter:
             if not client.is_connected:
                 raise ConnectionError("Client disconnected during connection setup")
 
+            # A locally generated secret does not prove CMD 73 reached the device.
+            # Leave unconfirmed pairing to the coordinator.
+            if self.commands is not None and self.commands.registration_confirmed:
+                try:
+                    await self._authenticate_connection(client)
+
+                    if not client.is_connected:
+                        raise ConnectionError("Client disconnected during authentication")
+                except (Exception, asyncio.CancelledError):
+                    try:
+                        await asyncio.wait_for(client.disconnect(), timeout=5.0)
+                    except Exception as err:
+                        self.logger.debug("Failed to close unauthenticated client: %s", err)
+                    raise
+
             self._client = client
             self.connected_devices[address] = client
             self._has_connected = True
@@ -217,6 +240,32 @@ class HABluetoothAdapter:
                 self._update_connection_status(ConnectionStatus.RECONNECTING, error_msg)
             
             return False
+
+    async def _authenticate_connection(self, client) -> None:
+        """Restore the Petkit session before exposing a reconnected client."""
+        if self.commands is None or not hasattr(self.commands, "secret"):
+            raise ConnectionError("Petkit session secret is not available")
+
+        sequence = self.commands.sequence
+        self.commands.increment_sequence()
+        message = Utils.build_command(sequence, 86, 1, self.commands.secret)
+        response = asyncio.get_running_loop().create_future()
+        self._authentication_response = (sequence, response)
+
+        try:
+            async with asyncio.timeout(5.0):
+                await client.start_notify(
+                    Constants.READ_UUID, self._handle_notification_wrapper
+                )
+                # The consumer may itself be reconnecting, so do not use its queue.
+                await client.write_gatt_char(Constants.WRITE_UUID, message, response=False)
+                if not await response:
+                    raise ConnectionError("Petkit session authentication was rejected")
+            self.logger.debug("Petkit session authenticated after reconnect")
+        finally:
+            self._authentication_response = None
+            if not response.done():
+                response.cancel()
 
     async def disconnect_device(self, address: str, trigger_reconnect: bool = False) -> bool:
         """Disconnect from device.
@@ -385,6 +434,16 @@ class HABluetoothAdapter:
 
     async def _handle_notification_wrapper(self, sender, data):
         """Wrapper for notification handling."""
+        if self._authentication_response is not None and len(data) == 10:
+            sequence, response = self._authentication_response
+            if (
+                data[:3] == b"\xfa\xfc\xfd"
+                and data[3:8] == bytes([86, 2, sequence, 1, 0])
+                and data[-1] == 251
+                and not response.done()
+            ):
+                response.set_result(data[8] == 1)
+
         # Update last seen timestamp on successful notification
         self._update_last_seen()
         self.logger.debug(f"📨 Received BLE notification from {sender}: {data.hex() if data else 'None'}")
@@ -592,22 +651,13 @@ class HABluetoothAdapter:
                     success = await self.connect_device(address)
 
                     if success:
+                        if self.commands is None or not self.commands.registration_confirmed:
+                            await self.start_notifications(address, Constants.READ_UUID)
+
                         self.logger.info(
                             "Immediate reconnection successful after %s attempts",
                             self._connection_attempts,
                         )
-
-                        try:
-                            from .PetkitW5BLEMQTT.constants import Constants
-
-                            await self.start_notifications(
-                                address, Constants.READ_UUID
-                            )
-                            self.logger.info("Notifications restarted successfully")
-                        except Exception as err:
-                            self.logger.warning(
-                                "Failed to restart notifications: %s", err
-                            )
 
                         break
 
