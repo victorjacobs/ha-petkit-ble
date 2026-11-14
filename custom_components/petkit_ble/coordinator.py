@@ -390,13 +390,19 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         if not self._initialized:
             raise UpdateFailed("Device is not initialized")
 
-        if not self.ble_manager.connected_devices.get(self.address):
-            raise UpdateFailed("Device is not connected")
-
         try:
-            await asyncio.wait_for(self.commands.set_reset_filter(), timeout=10)
+            async with asyncio.timeout(10):
+                if not await self.ble_manager.connect_device(self.address):
+                    raise UpdateFailed(
+                        "Could not reconnect to the device: "
+                        f"{self.ble_manager.connection_error}"
+                    )
+
+                await self.commands.set_reset_filter()
         except TimeoutError as err:
             raise UpdateFailed("Timed out while resetting the filter") from err
+        finally:
+            self.async_update_listeners()
         
     async def async_set_device_config(self, config_data: list) -> None:
         """Set device configuration."""
@@ -420,6 +426,7 @@ class PetkitBLECoordinator(ActiveBluetoothProcessorCoordinator[PetkitBLEData]):
         try:
             # Check if device is still connected before attempting commands
             if not self.ble_manager.connected_devices.get(self.address):
+                self.async_update_listeners()
                 if self.ble_manager.reconnection_in_progress:
                     _LOGGER.debug(
                         "Device refresh deferred while reconnection is in progress"

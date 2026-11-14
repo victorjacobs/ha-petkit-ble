@@ -63,6 +63,7 @@ class HABluetoothAdapter:
         self._reconnection_task = None  # Track reconnection task
         self._connection_lock = asyncio.Lock()
         self._authentication_response = None
+        self._authentication_command = None
 
     async def scan(self) -> dict[str, Any]:
         """Scan for Petkit BLE devices using HA's bluetooth integration."""
@@ -246,24 +247,51 @@ class HABluetoothAdapter:
         if self.commands is None or not hasattr(self.commands, "secret"):
             raise ConnectionError("Petkit session secret is not available")
 
+        async with asyncio.timeout(5.0):
+            await client.start_notify(
+                Constants.READ_UUID, self._handle_notification_wrapper
+            )
+            if await self._send_session_command(client, 86, self.commands.secret):
+                self.logger.debug("Petkit session authenticated after reconnect")
+                return
+
+            # Startup registration restores control on firmware that rejects
+            # the saved session. Reuse its credentials rather than creating new ones.
+            self.logger.warning(
+                "Petkit authentication rejected; restoring existing registration"
+            )
+            registration = (
+                Utils.pad_array(self.commands.device.device_id_bytes, 8)
+                + self.commands.secret
+            )
+            if not await self._send_session_command(client, 73, registration):
+                raise ConnectionError("Petkit session registration was rejected")
+
+            self.logger.info("Petkit session restored with existing registration")
+
+    async def _send_session_command(self, client, command: int, data: list[int]) -> bool:
+        """Send one handshake frame directly and await its matching response."""
+        if self.commands is None:
+            raise ConnectionError("Petkit session commands are not available")
+
         sequence = self.commands.sequence
         self.commands.increment_sequence()
-        message = Utils.build_command(sequence, 86, 1, self.commands.secret)
+        message = Utils.build_command(sequence, command, 1, data)
         response = asyncio.get_running_loop().create_future()
         self._authentication_response = (sequence, response)
+        self._authentication_command = command
+        if command == 73:
+            self.commands.pending_registration_sequence = sequence
 
         try:
-            async with asyncio.timeout(5.0):
-                await client.start_notify(
-                    Constants.READ_UUID, self._handle_notification_wrapper
-                )
-                # The consumer may itself be reconnecting, so do not use its queue.
-                await client.write_gatt_char(Constants.WRITE_UUID, message, response=False)
-                if not await response:
-                    raise ConnectionError("Petkit session authentication was rejected")
-            self.logger.debug("Petkit session authenticated after reconnect")
+            # The consumer may itself be reconnecting, so do not use its queue.
+            await client.write_gatt_char(Constants.WRITE_UUID, message, response=False)
+            return await response
         finally:
             self._authentication_response = None
+            self._authentication_command = None
+            if command == 73 and self.commands.pending_registration_sequence == sequence:
+                self.commands.pending_registration_sequence = None
             if not response.done():
                 response.cancel()
 
@@ -434,11 +462,15 @@ class HABluetoothAdapter:
 
     async def _handle_notification_wrapper(self, sender, data):
         """Wrapper for notification handling."""
-        if self._authentication_response is not None and len(data) == 10:
+        if (
+            self._authentication_response is not None
+            and self._authentication_command is not None
+            and len(data) == 10
+        ):
             sequence, response = self._authentication_response
             if (
                 data[:3] == b"\xfa\xfc\xfd"
-                and data[3:8] == bytes([86, 2, sequence, 1, 0])
+                and data[3:8] == bytes([self._authentication_command, 2, sequence, 1, 0])
                 and data[-1] == 251
                 and not response.done()
             ):

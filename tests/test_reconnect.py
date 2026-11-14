@@ -87,6 +87,7 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.release_auth = asyncio.Event()
         self.release_auth.set()
         self.auth_result = 1
+        self.registration_result = 1
 
         async def start_notify(uuid, callback):
             self.assertEqual(uuid, Constants.READ_UUID)
@@ -98,10 +99,11 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
             self.writes.append(packet)
             if packet["cmd"] == 73:
                 self.assertEqual(len(packet["data"]), 16)
-                self.registered_secret = list(packet["data"][8:])
-                self.authenticated = True
+                if self.registration_result == 1:
+                    self.registered_secret = list(packet["data"][8:])
+                    self.authenticated = True
                 await self.notification_callback(
-                    None, Utils.build_command(packet["seq"], 73, 2, [1])
+                    None, Utils.build_command(packet["seq"], 73, 2, [self.registration_result])
                 )
             elif packet["cmd"] == 86:
                 self.assertIsNotNone(self.notification_callback)
@@ -221,8 +223,28 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(self.adapter.connected_devices[self.address], self.client)
 
-    async def test_rejected_authentication_closes_client_and_allows_retry(self):
+    async def test_rejected_authentication_restores_existing_registration(self):
+        original_secret = self.commands.secret.copy()
+        self.registered_secret = None
+        self.assertTrue(await self.adapter.connect_device(self.address))
+
+        consumer = asyncio.create_task(
+            self.adapter.message_consumer(self.address, Constants.WRITE_UUID)
+        )
+        try:
+            await asyncio.wait_for(self.commands.set_reset_filter(), timeout=1)
+        finally:
+            consumer.cancel()
+            await consumer
+
+        self.assertEqual([packet["cmd"] for packet in self.writes], [86, 73, 222])
+        self.assertEqual(self.commands.secret, original_secret)
+        self.assertEqual(self.registered_secret, original_secret)
+        self.assertEqual(self.device.status["filter_percentage"], 1.0)
+
+    async def test_rejected_authentication_and_registration_closes_client_and_allows_retry(self):
         self.auth_result = 0
+        self.registration_result = 0
         self.assertFalse(await self.adapter.connect_device(self.address))
         self.assertNotIn(self.address, self.adapter.connected_devices)
         self.client.disconnect.assert_awaited_once()
@@ -230,7 +252,45 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.auth_result = 1
         self.assertTrue(await self.adapter.connect_device(self.address))
-        self.assertEqual([packet["seq"] for packet in self.writes], [0, 1])
+        self.assertEqual([packet["seq"] for packet in self.writes], [0, 1, 2])
+
+    async def test_registration_recovery_ignores_unrelated_acknowledgements(self):
+        self.auth_result = 0
+        write = self.client.write_gatt_char.side_effect
+
+        async def unrelated_acknowledgements(uuid, message, *, response):
+            packet = Utils.parse_bytearray(message)
+            if packet["cmd"] == 73:
+                sequence, pending = self.adapter._authentication_response
+                for command, reply_sequence in ((86, sequence), (73, sequence + 1)):
+                    await self.notification_callback(
+                        None, Utils.build_command(reply_sequence, command, 2, [1])
+                    )
+                    self.assertFalse(pending.done())
+            await write(uuid, message, response=response)
+
+        self.client.write_gatt_char.side_effect = unrelated_acknowledgements
+        self.assertTrue(await self.adapter.connect_device(self.address))
+        self.assertEqual([packet["cmd"] for packet in self.writes], [86, 73])
+        self.assertIsNone(self.commands.pending_registration_sequence)
+
+    async def test_registration_recovery_timeout_does_not_publish_client(self):
+        self.auth_result = 0
+        write = self.client.write_gatt_char.side_effect
+
+        async def missing_registration_ack(uuid, message, *, response):
+            if Utils.parse_bytearray(message)["cmd"] != 73:
+                await write(uuid, message, response=response)
+
+        self.client.write_gatt_char.side_effect = missing_registration_ack
+        real_timeout = asyncio.timeout
+        with patch.object(asyncio, "timeout", lambda _: real_timeout(0.01)):
+            self.assertFalse(await self.adapter.connect_device(self.address))
+
+        self.assertNotIn(self.address, self.adapter.connected_devices)
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.adapter._authentication_response)
+        self.assertIsNone(self.commands.pending_registration_sequence)
 
     async def test_notification_subscription_is_bounded_before_authentication(self):
         subscribed = asyncio.Event()
